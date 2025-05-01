@@ -1,0 +1,253 @@
+"""
+INST414 - Hate Speech Analysis (Non-Blocking Visualization)
+Samuel Conteh
+"""
+
+
+# ======================
+# 1. ESSENTIAL IMPORTS
+# ======================
+import re
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Set non-interactive backend first
+import matplotlib.pyplot as plt
+import torch
+from datasets import Dataset, DatasetDict
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+    TrainingArguments,
+    Trainer,
+    DataCollatorWithPadding
+)
+from sklearn.metrics import f1_score
+import transformers
+print(f"Transformers version: {transformers.__version__}")  # Must show 4.40.0
+assert transformers.__version__ >= '4.0.0', "Outdated transformers!"
+
+
+# ======================
+# 2. GLOBAL CONFIGURATION
+# ======================
+CLASS_LABELS = {0: "hate_speech", 1: "offensive", 2: "neither"}
+SUBCATEGORIES = ["racism", "sexism", "homophobia_transphobia",
+                "religious_hate", "xenophobia", "disability_hate"]
+MODEL_NAME = "GroNLP/hateBERT" #  THE NAME OF THE MODEL
+MAX_LENGTH = 128
+
+
+# ======================
+# 3. CORE FUNCTIONS (NON-BLOCKING VISUALIZATION)
+# ======================
+def clean_text(text):
+    """Basic text cleaning with enhanced validation"""
+    try:
+        if not isinstance(text, str):
+            if pd.isnull(text):
+                return ""
+            text = str(text)
+           
+        text = text.lower()
+        text = re.sub(r"http\S+|www\S+|https\S+", "", text)
+        text = re.sub(r"@\w+", "[MENTION]", text)
+        text = re.sub(r"[^a-z0-9 .,!?'#]", "", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text if text else "[EMPTY]"
+    except Exception as e:
+        print(f"Error cleaning text: {str(e)}")
+        return "[ERROR]"
+
+
+def perform_eda(dataset):
+    """Save EDA plots to file"""
+    df = dataset["train"].to_pandas()
+   
+    # Data validation
+    if "class" not in df.columns:
+        raise KeyError(f"'class' column missing. Existing columns: {df.columns.tolist()}")
+   
+    # Clean invalid classes
+    valid_classes = [0, 1, 2]
+    invalid_mask = ~df["class"].isin(valid_classes)
+    if invalid_mask.any():
+        df = df[~invalid_mask].copy()
+   
+    # Generate plots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+   
+    # Class distribution
+    class_dist = df["class"].value_counts().sort_index()
+    class_dist.index = [CLASS_LABELS[i] for i in class_dist.index]
+    class_dist.plot(kind="bar", ax=ax1, color=["red", "orange", "green"], edgecolor="black")
+    ax1.set_title("Class Distribution")
+   
+    # Tweet length distribution
+    df["tweet_length"] = df["tweet"].apply(lambda x: len(x.split()))
+    ax2.hist(df["tweet_length"], bins=50, edgecolor="black")
+    ax2.set_title("Tweet Length Distribution")
+   
+    plt.tight_layout()
+    plt.savefig("eda_plots.png", bbox_inches='tight')
+    plt.close()
+    return df
+
+
+def analyze_subcategories(texts, model, tokenizer):
+    """Save subcategory analysis to file"""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+   
+    inputs = tokenizer(texts, padding=True, truncation=True,
+                     max_length=MAX_LENGTH, return_tensors="pt").to(device)
+   
+    with torch.no_grad():
+        outputs = model(**inputs)
+   
+    probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
+    subcat_counts = {cat:0 for cat in SUBCATEGORIES}
+   
+    for prob_vec in probs:
+        dominant = torch.argmax(prob_vec).item()
+        subcat_counts[SUBCATEGORIES[dominant]] += 1
+   
+    # Generate plot
+    plt.figure(figsize=(10,6))
+    pd.Series(subcat_counts).sort_values().plot(kind="barh", edgecolor="black")
+    plt.title("Hate Speech Subcategories")
+    plt.savefig("subcategories.png", bbox_inches='tight')
+    plt.close()
+   
+    return subcat_counts
+
+
+# ======================
+# 4. MAIN EXECUTION FLOW
+# ======================
+def main():
+    try:
+        print("=== STARTING ANALYSIS ===")
+       
+        # Load data
+        print("\n[1/7] Loading dataset...")
+        df = pd.read_csv("hate_offensive_set.csv")
+        required_cols = {"tweet", "class"}
+        assert required_cols.issubset(df.columns), f"Missing columns: {required_cols - set(df.columns)}"
+        dataset = DatasetDict({"train": Dataset.from_pandas(df)})
+       
+        # EDA
+        print("[2/7] Performing EDA...")
+        perform_eda(dataset)
+       
+        # Data preparation
+        print("[3/7] Preprocessing data...")
+        split_dataset = dataset["train"].train_test_split(test_size=0.2)
+       
+        split_dataset = split_dataset.map(
+            lambda batch: {
+                "tweet": [clean_text(t) for t in batch["tweet"]],
+                "class": batch["class"]
+            },
+            batched=True,
+            batch_size=1000
+        )
+       
+        # Model setup
+        print("[4/7] Initializing model...")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            MODEL_NAME,
+            num_labels=3,
+            id2label=CLASS_LABELS
+        )
+       
+        # Tokenization
+        print("[5/7] Tokenizing data...")
+        dataset = split_dataset.map(
+            lambda batch: tokenizer(
+                batch["tweet"],
+                max_length=MAX_LENGTH,
+                truncation=True,
+                padding="max_length"
+            ),
+            batched=True,
+            batch_size=1000
+        )
+        dataset = dataset.rename_column("class", "labels")
+       
+        # Training configuration
+        print("[6/7] Configuring training...")
+        training_args = TrainingArguments(
+            output_dir="./results",
+            num_train_epochs=1,  # Reduce epochs temporarily
+            per_device_train_batch_size=64 if torch.cuda.is_available() else 8,  # Maximize GPU usage
+            per_device_eval_batch_size=128,
+            fp16=torch.cuda.is_available(),  # Ensure this is True for GPU
+            gradient_accumulation_steps=4,  # Better GPU utilization
+            evaluation_strategy="steps",
+            eval_steps=100,  # Check progress more frequently
+            save_strategy="no",  # Disable model checkpointing
+            logging_steps=50,
+            learning_rate=3e-5,
+            report_to="none"
+        )
+       
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=dataset["train"],
+            eval_dataset=dataset["test"],
+            compute_metrics=lambda p: {
+                "accuracy": (p.predictions.argmax(-1) == p.label_ids).mean(),
+                "f1": f1_score(p.label_ids, p.predictions.argmax(-1), average="macro")
+            },
+            data_collator=DataCollatorWithPadding(tokenizer)
+        )
+       
+        # Execute training
+        print("[7/7] Starting training...")
+        trainer.train()
+       
+        # Post-training analysis
+        print("\n===== FINAL RESULTS =====")
+        metrics = trainer.evaluate()
+        print(f"Validation Accuracy: {metrics['eval_accuracy']:.4f}")
+        print(f"Validation F1 Score: {metrics['eval_f1']:.4f}")
+       
+        # Generate training metrics plot
+        def plot_training_metrics(log_history):
+            steps = [log['step'] for log in log_history if 'eval_f1' in log]
+            f1_scores = [log['eval_f1'] for log in log_history if 'eval_f1' in log]
+           
+            plt.figure()
+            plt.plot(steps, f1_scores, marker='o')
+            plt.xlabel("Validation Steps")
+            plt.ylabel("F1 Score")
+            plt.title("Validation Performance")
+            plt.savefig("training_metrics.png")
+            plt.close()
+       
+        print("\n[Post-Processing] Generating metrics plot...")
+        plot_training_metrics(trainer.state.log_history)
+       
+        # Subcategory analysis
+        print("\n===== SUBCATEGORY ANALYSIS =====")
+        hate_samples = [x["tweet"] for x in dataset["test"] if x["labels"] == 0][:1000]
+        analyze_subcategories(hate_samples, model, tokenizer)
+       
+        print("\n=== ANALYSIS COMPLETE ===")
+        print("Visualizations saved to:")
+        print("- eda_plots.png (Initial EDA)")
+        print("- subcategories.png (Hate speech breakdown)")
+        print("- training_metrics.png (Validation performance)")
+
+
+    except Exception as e:
+        print(f"\nERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
+
+if __name__ == "__main__":
+    main()
