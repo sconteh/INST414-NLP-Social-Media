@@ -1,253 +1,259 @@
-"""
-INST414 - Hate Speech Analysis (Non-Blocking Visualization)
-Samuel Conteh
-"""
+# =============================
+# INST414 - Sprint 3 (Google Colab Version)
+# Hate Speech Classification with HateBERT + EDA + GPT-4.1-nano Categorization
+# =============================
 
+# ✅ Mount Google Drive (optional)
+from google.colab import drive
+import os
 
-# ======================
-# 1. ESSENTIAL IMPORTS
-# ======================
-import re
+drive.mount('/content/drive')  # comment out if not needed
+
+# ✅ Install Dependencies
+!pip install transformers torch pandas scikit-learn datasets tabulate matplotlib seaborn tqdm openai --quiet
+
+# ✅ Imports
+import getpass
+import re, json, time, torch
 import pandas as pd
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')  # Set non-interactive backend first
+from pathlib import Path
+import seaborn as sns
 import matplotlib.pyplot as plt
-import torch
-from datasets import Dataset, DatasetDict
-from transformers import (
-    AutoTokenizer,
-    AutoModelForSequenceClassification,
-    TrainingArguments,
-    Trainer,
-    DataCollatorWithPadding
-)
-from sklearn.metrics import f1_score
-import transformers
-print(f"Transformers version: {transformers.__version__}")  # Must show 4.40.0
-assert transformers.__version__ >= '4.0.0', "Outdated transformers!"
+from tqdm.notebook import tqdm
+from tabulate import tabulate
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, classification_report, cohen_kappa_score
+from sklearn.feature_extraction.text import TfidfVectorizer
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import openai
+from google.colab import files
 
+# ✅ Ensure Plots Folder
+os.makedirs("plots", exist_ok=True)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Running on:", device)
 
-# ======================
-# 2. GLOBAL CONFIGURATION
-# ======================
-CLASS_LABELS = {0: "hate_speech", 1: "offensive", 2: "neither"}
-SUBCATEGORIES = ["racism", "sexism", "homophobia_transphobia",
-                "religious_hate", "xenophobia", "disability_hate"]
-MODEL_NAME = "GroNLP/hateBERT" #  THE NAME OF THE MODEL
-MAX_LENGTH = 128
+# Persistent Drive output directory
+drive_output_dir = "/content/drive/MyDrive/INST414 - Social Media NLP Project"
+os.makedirs(drive_output_dir, exist_ok=True)
 
+# ✅ Load HateBERT
+print("Loading HateBERT model...")
+tokenizer = AutoTokenizer.from_pretrained("Hate-speech-CNERG/dehatebert-mono-english")
+model = AutoModelForSequenceClassification.from_pretrained("Hate-speech-CNERG/dehatebert-mono-english").to(device)
+model.eval()
 
-# ======================
-# 3. CORE FUNCTIONS (NON-BLOCKING VISUALIZATION)
-# ======================
-def clean_text(text):
-    """Basic text cleaning with enhanced validation"""
-    try:
-        if not isinstance(text, str):
-            if pd.isnull(text):
-                return ""
-            text = str(text)
-           
-        text = text.lower()
-        text = re.sub(r"http\S+|www\S+|https\S+", "", text)
-        text = re.sub(r"@\w+", "[MENTION]", text)
-        text = re.sub(r"[^a-z0-9 .,!?'#]", "", text)
-        text = re.sub(r"\s+", " ", text).strip()
-        return text if text else "[EMPTY]"
-    except Exception as e:
-        print(f"Error cleaning text: {str(e)}")
-        return "[ERROR]"
+# ✅ Upload Dataset
+uploaded = files.upload()
+filepath = next(iter(uploaded))
 
+# =============================
+# Core Functions
+# =============================
 
-def perform_eda(dataset):
-    """Save EDA plots to file"""
-    df = dataset["train"].to_pandas()
-   
-    # Data validation
-    if "class" not in df.columns:
-        raise KeyError(f"'class' column missing. Existing columns: {df.columns.tolist()}")
-   
-    # Clean invalid classes
-    valid_classes = [0, 1, 2]
-    invalid_mask = ~df["class"].isin(valid_classes)
-    if invalid_mask.any():
-        df = df[~invalid_mask].copy()
-   
-    # Generate plots
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-   
-    # Class distribution
-    class_dist = df["class"].value_counts().sort_index()
-    class_dist.index = [CLASS_LABELS[i] for i in class_dist.index]
-    class_dist.plot(kind="bar", ax=ax1, color=["red", "orange", "green"], edgecolor="black")
-    ax1.set_title("Class Distribution")
-   
-    # Tweet length distribution
-    df["tweet_length"] = df["tweet"].apply(lambda x: len(x.split()))
-    ax2.hist(df["tweet_length"], bins=50, edgecolor="black")
-    ax2.set_title("Tweet Length Distribution")
-   
-    plt.tight_layout()
-    plt.savefig("eda_plots.png", bbox_inches='tight')
-    plt.close()
+def load_dataframe(filepath):
+    df = pd.read_csv(filepath)
+    print(f"Loaded dataset with shape: {df.shape}")
+    print(df.head())
     return df
 
+def clean_tweet(tweet):
+    tweet = re.sub(r"@\w+", "", tweet)
+    tweet = re.sub(r"http\S+|www\S+|https\S+", "", tweet)
+    tweet = re.sub(r"\s+", " ", tweet).strip()
+    return tweet
 
-def analyze_subcategories(texts, model, tokenizer):
-    """Save subcategory analysis to file"""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-   
-    inputs = tokenizer(texts, padding=True, truncation=True,
-                     max_length=MAX_LENGTH, return_tensors="pt").to(device)
-   
-    with torch.no_grad():
-        outputs = model(**inputs)
-   
-    probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
-    subcat_counts = {cat:0 for cat in SUBCATEGORIES}
-   
-    for prob_vec in probs:
-        dominant = torch.argmax(prob_vec).item()
-        subcat_counts[SUBCATEGORIES[dominant]] += 1
-   
-    # Generate plot
-    plt.figure(figsize=(10,6))
-    pd.Series(subcat_counts).sort_values().plot(kind="barh", edgecolor="black")
-    plt.title("Hate Speech Subcategories")
-    plt.savefig("subcategories.png", bbox_inches='tight')
+def clean_dataframe(df, text_column="tweet"):
+    df["cleaned_tweet"] = df[text_column].apply(clean_tweet)
+    return df
+
+def compare_dataframes(df):
+    print("\nSample of original vs. cleaned tweets:")
+    print(df[["tweet", "cleaned_tweet"]].head())
+
+def plot_label_distribution(df):
+    label_map = {0: "hate_speech", 1: "offensive", 2: "neither"}
+    df["label_text"] = df["class"].map(label_map)
+    sns.countplot(data=df, x="label_text", order=["hate_speech", "offensive", "neither"])
+    plt.title("Annotator Label Distribution")
+    plt.tight_layout()
+    plt.savefig("plots/annotator_label_distribution.png")  # save here
     plt.close()
-   
-    return subcat_counts
+
+def plot_tweet_length_distribution(df):
+    df["tweet_length"] = df["tweet"].apply(len)
+    sns.histplot(df["tweet_length"], bins=30, kde=True)
+    plt.title("Tweet Length Distribution")
+    plt.tight_layout()
+    plt.savefig("plots/tweet_length_distribution.png")
+    plt.close()
+
+def show_top_tfidf_words(df, label_value, label_column="class", text_column="cleaned_tweet", top_n=15):
+    subset = df[df[label_column] == label_value]
+    vectorizer = TfidfVectorizer(stop_words='english')
+    tfidf_matrix = vectorizer.fit_transform(subset[text_column])
+    means = tfidf_matrix.mean(axis=0).A1
+    words = vectorizer.get_feature_names_out()
+    top_indices = means.argsort()[::-1][:top_n]
+    for i in top_indices:
+        print(f"{words[i]}: {means[i]:.3f}")
+
+def classify_tweet_hatebert(df, text_column="cleaned_tweet", batch_size=32):
+    label_map = {0: "hate_speech", 1: "offensive", 2: "neither"}
+    predictions = []
+    for i in tqdm(range(0, len(df), batch_size), desc="Classifying with HateBERT"):
+        batch_texts = df[text_column].iloc[i:i+batch_size].tolist()
+        inputs = tokenizer(batch_texts, return_tensors="pt", padding=True, truncation=True, max_length=512).to(device)
+        with torch.no_grad():
+            outputs = model(**inputs)
+            logits = outputs.logits
+            preds = torch.argmax(logits, dim=1).cpu().tolist()
+            predictions.extend(preds)
+    df["hatebert_label"] = predictions
+    df["hatebert_label_text"] = df["hatebert_label"].map(label_map)
+    return df
+
+def plot_prediction_distribution(df):
+    sns.countplot(data=df, x="hatebert_label_text", order=["hate_speech", "offensive", "neither"])
+    plt.title("HateBERT Predicted Label Distribution")
+    plt.tight_layout()
+    plt.savefig("plots/hatebert_label_distribution.png")
+    plt.close()
+
+def plot_annotator_vs_hatebert_comparison(df):
+    label_map = {0: "hate_speech", 1: "offensive", 2: "neither"}
+    df["annotator_label_text"] = df["class"].map(label_map)
+    melted = pd.melt(df, value_vars=["annotator_label_text", "hatebert_label_text"],
+                     var_name="Source", value_name="Label")
+    sns.countplot(data=melted, x="Label", hue="Source", order=["hate_speech", "offensive", "neither"])
+    plt.title("Annotator vs. HateBERT Prediction Distribution")
+    plt.tight_layout()
+    plt.savefig("plots/annotator_vs_hatebert.png")
+    plt.show()
+
+def plot_confusion(df):
+    labels = [0, 1, 2]
+    cm = confusion_matrix(df["class"], df["hatebert_label"], labels=labels)
+    disp = ConfusionMatrixDisplay(cm, display_labels=["hate_speech", "offensive", "neither"])
+    disp.plot(cmap=plt.cm.Blues)
+    plt.title("Confusion Matrix (Counts)")
+    plt.savefig("plots/confusion_matrix_counts.png")
+    plt.close()
+
+    cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    disp_norm = ConfusionMatrixDisplay(cm_norm, display_labels=["hate_speech", "offensive", "neither"])
+    disp_norm.plot(cmap=plt.cm.Oranges, values_format=".2f")
+    plt.title("Confusion Matrix (Percentages)")
+    plt.savefig("plots/confusion_matrix_percentages.png")
+    plt.close()
+
+# 🔐 Replace this with your actual OpenAI key
+def classify_with_openai_subcategories(df, max_tweets=600):
+    import getpass
+    openai.api_key = getpass.getpass("Enter your OpenAI API key: ")
+
+    prompt_template = """You are a hate speech expert. Categorize the following tweet into one or more of these categories:
+- Racism
+- Sexism / Misogyny
+- Homophobia / Transphobia
+- Religious Hate
+- Xenophobia
+- Ageism
+- Ableism
+
+Tweet: "{tweet}"
+
+Return a JSON array of matching categories. If none, return an empty array.
+Example: ["Racism"]
+"""
+
+    # Ensure column exists
+    if "hate_subcategories" not in df.columns:
+        df["hate_subcategories"] = None
+
+    hate_tweets = df[df["hatebert_label"] == 0].head(max_tweets)
+
+    for i, row in tqdm(hate_tweets.iterrows(), total=len(hate_tweets), desc="Classifying with OpenAI"):
+        if pd.notna(row.get("hate_subcategories")) and row["hate_subcategories"] not in ["[]", ""]:
+            continue  # Skip if already classified
+
+        tweet = row["cleaned_tweet"]
+        try:
+            response = openai.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": "You are a hate speech classification assistant."},
+                    {"role": "user", "content": prompt_template.format(tweet=tweet)}
+                ],
+                temperature=0.2,
+            )
+            categories = json.loads(response.choices[0].message.content)
+        except Exception as e:
+            print(f"Error on index {i}: {e}")
+            categories = []
+        df.at[i, "hate_subcategories"] = categories
+
+    return df
+
+plot_label_distribution(df)
+plot_tweet_length_distribution(df)
+
+print("\nTF-IDF for hate speech:")
+show_top_tfidf_words(df, 0)
+
+print("\nTF-IDF for offensive speech:")
+show_top_tfidf_words(df, 1)
+
+print("🔄 Checking for HateBERT cache...")
+hatebert_cache = Path("hatebert_output.csv")
+
+if hatebert_cache.exists():
+    print("✅ Loaded cached HateBERT+OpenAI results.")
+    df = pd.read_csv(hatebert_cache)
+else:
+    print("⚙️ HateBERT not found — running classification...")
+    df = load_dataframe(filepath)
+    df = clean_dataframe(df)
+    compare_dataframes(df)
+    df = classify_tweet_hatebert(df)
+    df.to_csv(hatebert_cache, index=False)
+    print("✅ HateBERT results saved to cache.")
+
+# Run OpenAI on up to N hate speech tweets
+df = classify_with_openai_subcategories(df, max_tweets=600)  # or max_hate later
+df.to_csv("hatebert_openai_categorized.csv", index=False)
+
+print(df["hatebert_label_text"].value_counts())
+plot_prediction_distribution(df)
+plot_annotator_vs_hatebert_comparison(df)
+
+print("\n🔍 Confusion Matrix:")
+plot_confusion(df)
+
+!cp plots/*.png /content/drive/MyDrive/INST414 - Social Media NLP Project/
+
+print("\n📊 Classification Report:")
+print(classification_report(df["class"], df["hatebert_label"], target_names=["hate_speech", "offensive", "neither"]))
+
+print("\n🤝 Cohen’s Kappa:")
+print(cohen_kappa_score(df["class"], df["hatebert_label"]))
+
+!cp hatebert_openai_categorized.csv /content/drive/MyDrive/INST414 - Social Media NLP Project/
+print("Saved to hatebert_openai_categorized.csv")
 
 
-# ======================
-# 4. MAIN EXECUTION FLOW
-# ======================
-def main():
-    try:
-        print("=== STARTING ANALYSIS ===")
-       
-        # Load data
-        print("\n[1/7] Loading dataset...")
-        df = pd.read_csv("hate_offensive_set.csv")
-        required_cols = {"tweet", "class"}
-        assert required_cols.issubset(df.columns), f"Missing columns: {required_cols - set(df.columns)}"
-        dataset = DatasetDict({"train": Dataset.from_pandas(df)})
-       
-        # EDA
-        print("[2/7] Performing EDA...")
-        perform_eda(dataset)
-       
-        # Data preparation
-        print("[3/7] Preprocessing data...")
-        split_dataset = dataset["train"].train_test_split(test_size=0.2)
-       
-        split_dataset = split_dataset.map(
-            lambda batch: {
-                "tweet": [clean_text(t) for t in batch["tweet"]],
-                "class": batch["class"]
-            },
-            batched=True,
-            batch_size=1000
-        )
-       
-        # Model setup
-        print("[4/7] Initializing model...")
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        model = AutoModelForSequenceClassification.from_pretrained(
-            MODEL_NAME,
-            num_labels=3,
-            id2label=CLASS_LABELS
-        )
-       
-        # Tokenization
-        print("[5/7] Tokenizing data...")
-        dataset = split_dataset.map(
-            lambda batch: tokenizer(
-                batch["tweet"],
-                max_length=MAX_LENGTH,
-                truncation=True,
-                padding="max_length"
-            ),
-            batched=True,
-            batch_size=1000
-        )
-        dataset = dataset.rename_column("class", "labels")
-       
-        # Training configuration
-        print("[6/7] Configuring training...")
-        training_args = TrainingArguments(
-            output_dir="./results",
-            num_train_epochs=1,  # Reduce epochs temporarily
-            per_device_train_batch_size=64 if torch.cuda.is_available() else 8,  # Maximize GPU usage
-            per_device_eval_batch_size=128,
-            fp16=torch.cuda.is_available(),  # Ensure this is True for GPU
-            gradient_accumulation_steps=4,  # Better GPU utilization
-            evaluation_strategy="steps",
-            eval_steps=100,  # Check progress more frequently
-            save_strategy="no",  # Disable model checkpointing
-            logging_steps=50,
-            learning_rate=3e-5,
-            report_to="none"
-        )
-       
-        trainer = Trainer(
-            model=model,
-            args=training_args,
-            train_dataset=dataset["train"],
-            eval_dataset=dataset["test"],
-            compute_metrics=lambda p: {
-                "accuracy": (p.predictions.argmax(-1) == p.label_ids).mean(),
-                "f1": f1_score(p.label_ids, p.predictions.argmax(-1), average="macro")
-            },
-            data_collator=DataCollatorWithPadding(tokenizer)
-        )
-       
-        # Execute training
-        print("[7/7] Starting training...")
-        trainer.train()
-       
-        # Post-training analysis
-        print("\n===== FINAL RESULTS =====")
-        metrics = trainer.evaluate()
-        print(f"Validation Accuracy: {metrics['eval_accuracy']:.4f}")
-        print(f"Validation F1 Score: {metrics['eval_f1']:.4f}")
-       
-        # Generate training metrics plot
-        def plot_training_metrics(log_history):
-            steps = [log['step'] for log in log_history if 'eval_f1' in log]
-            f1_scores = [log['eval_f1'] for log in log_history if 'eval_f1' in log]
-           
-            plt.figure()
-            plt.plot(steps, f1_scores, marker='o')
-            plt.xlabel("Validation Steps")
-            plt.ylabel("F1 Score")
-            plt.title("Validation Performance")
-            plt.savefig("training_metrics.png")
-            plt.close()
-       
-        print("\n[Post-Processing] Generating metrics plot...")
-        plot_training_metrics(trainer.state.log_history)
-       
-        # Subcategory analysis
-        print("\n===== SUBCATEGORY ANALYSIS =====")
-        hate_samples = [x["tweet"] for x in dataset["test"] if x["labels"] == 0][:1000]
-        analyze_subcategories(hate_samples, model, tokenizer)
-       
-        print("\n=== ANALYSIS COMPLETE ===")
-        print("Visualizations saved to:")
-        print("- eda_plots.png (Initial EDA)")
-        print("- subcategories.png (Hate speech breakdown)")
-        print("- training_metrics.png (Validation performance)")
+print("\nTop subcategories (frequency):")
+print(df["hate_subcategories"].explode().value_counts())
 
 
-    except Exception as e:
-        print(f"\nERROR: {str(e)}")
-        import traceback
-        traceback.print_exc()
+# final downloads
+# ✅ Save both CSVs to Google Drive
+!cp hatebert_openai_categorized.csv "$drive_output_dir/"
 
+# ✅ Save all plots
+!cp plots/*.png "$drive_output_dir/"
 
-if __name__ == "__main__":
-    main()
+# ✅ Zip everything in the output directory
+!zip -r /content/drive/MyDrive/INST414_Project_Archive.zip "$drive_output_dir"
+files.download("hatebert_openai_categorized.csv")
+!zip -r /content/drive/MyDrive/INST414_Project_Archive.zip "$drive_output_dir"
