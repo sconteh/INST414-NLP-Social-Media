@@ -71,6 +71,26 @@ This project uses the following tools and libraries:
 
 ⚠️ Remember: The OpenAI API is used, which required payment by the token to be used 
 
+### ✏️ How to Reproduce the Pipeline
+
+Here is a step-by-step guide in reproducing this Hate Speech Pipeline:
+
+#### 1. Install Dependencies
+Type this command within the Google Colab Notebook that you will use. If done locally, you can remove the exclamation point. 
+!pip install transformers torch pandas scikit-learn datasets tabulate matplotlib seaborn tqdm openai --quiet
+
+#### 2. Upload the Dataset 
+Download the specific dataset. Unfortunately this cannot be applied to any other dataset due to the nature of the code and the columns.
+Make sure to make the path of this line of code match where ever it is saved:
+
+drive_output_dir = "/content/drive/MyDrive/INST414 - Social Media NLP Project"
+os.makedirs(drive_output_dir, exist_ok=True)
+
+#### 4. Run the Notebook or Script
+To run the model in colab, you can upload it, leave the code as is, and run it at: colab.research.google.com. To run it locally, you would need to remove the lines associated with Google Colab
+
+#### 4. 
+
 ## 🧠 Future Work
 
 To build upon this project, some of the things that I or anyone can do is:
