@@ -57,9 +57,8 @@ All plots are saved in the /plots/ directory. Highlights include:
 ## 💬 Key Takeaways
 - Hate speech is contextual and not always textually explicit.
 - Subcategorizing hate speech improves interpretability for moderation.
-- Annotator disagreement suggests that human-labeled datasets alone are insufficient.
+- Annotator disagreement suggests that human-labeled datasets alone are insufficient. There must be investment in understanding what is and is not considered hate speech. Putting efforts towards a diverse set of annotators could be something that ensures that the standard for what is and is not considered hate speech can be as representative as possible.
 - LLMs like GPT can be used to augment human labeling with contextual granularity.
-
 
 ## 🔐 Reproducibility
 This project uses the following tools and libraries:
