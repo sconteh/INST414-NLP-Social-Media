@@ -87,9 +87,23 @@ drive_output_dir = "/content/drive/MyDrive/INST414 - Social Media NLP Project"
 os.makedirs(drive_output_dir, exist_ok=True)
 
 #### 4. Run the Notebook or Script
-To run the model in colab, you can upload it, leave the code as is, and run it at: colab.research.google.com. To run it locally, you would need to remove the lines associated with Google Colab
 
-#### 4. 
+To run the model in colab, you can upload it, leave the code as is, and run it at: colab.research.google.com. To run it locally, you would need to remove the lines associated with Google Colab and run the code as is. 
+
+#### 4. Upload the Dataset
+
+The code will first prompt you to enter in the Hate Speech and Offensive Language Dataset. Look for that on you local PC and select it.
+
+#### 5. Enter Your OpenAI Key
+
+This key will be personalized to your account. Do not share it with any one!
+
+#### 6. Outputs 
+
+All of the scripts outputs will be saved to:
+- hatebert_openai_categorized.csv
+- plots/ directory
+- INST414_Project_Archive.zip in Google Drive (if using Colab)
 
 ## 🧠 Future Work
 
