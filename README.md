@@ -115,4 +115,4 @@ To build upon this project, some of the things that I or anyone can do is:
 
 ## 🧾 Citation
 
-To find all of the works used in this project, you can go to the Sprint 4 document that I have created. It has the Works Cited as well as some of the Annotated Bibliographies. 
+To find all of the works used in this project, you can go to the Sprint 4 document that I have created. It has the Works Cited as well as some of the Annotated Bibliographies. Easiest way to check it out is on my [LinkedIn]([url](https://www.linkedin.com/in/samuel-conteh-812391208/details/projects/)) 
